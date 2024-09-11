@@ -259,9 +259,6 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
         wallet_class = EvrmoreWallet if network == 'evrmore' else RavencoinWallet
         wallet_attr = '_evrmoreWallet' if network == 'evrmore' else '_ravencoinWallet'
 
-        if not os.path.exists(wallet_path):
-            logging.warning(f'{network} wallet file does not exist', color='yellow')
-            return None
         try:
             existing_wallet = getattr(self, wallet_attr)
             if existing_wallet is not None:
@@ -269,11 +266,8 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
 
             wallet = wallet_class(
                 walletPath=wallet_path,
-                temporary=False,
                 reserve=0.25,
                 isTestnet=self.networkIsTest(network),
-                password=None,
-                use=None
             )
 
             setattr(self, wallet_attr, wallet)
@@ -288,9 +282,10 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
         vault_path = config.walletPath('vault.yaml')
         wallet_class = EvrmoreWallet if network == 'evrmore' else RavencoinWallet
         vault_attr = '_evrmoreVault' if network == 'evrmore' else '_ravencoinVault'
-
+        
         if not os.path.exists(vault_path) and not create:
             return None
+        
         try:
             existing_vault = getattr(self, vault_attr)
             if existing_vault is not None:
@@ -393,6 +388,9 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
         without a password it will open the vault (if it exists) but not decrypt
         it. this allows us to get it's balance, but not spend from it.
         '''
+        logging.info("!!!!!!!!!!!!!Opening the vault!!!!!!!!!", self._evrmoreVault.password, color="red")
+        logging.info("!!!!!!!!!!!!!Opening the vault!!!!!!!!!", self._evrmoreVault.isEncrypted, color="red")
+        
         self.closeVault()
         network = network or self.network
         vault = self.getVault(network, password, create)

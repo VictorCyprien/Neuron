@@ -1493,7 +1493,9 @@ def reportVault(network: str = 'main'):
         return redirect('/dashboard')
     # the network portion should be whatever network I'm on.
     vault = start.getVault(network=network)
+    logging.info("Public Key", vault.publicKey, color="yellow")
     vaultAddress = vault.address
+    logging.info("vaultAddress", vaultAddress, color="yellow")
     success, result = start.server.reportVault(
         walletSignature=start.getWallet(network=network).sign(vaultAddress),
         vaultSignature=vault.sign(vaultAddress),
