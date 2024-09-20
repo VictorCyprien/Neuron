@@ -970,6 +970,7 @@ def dashboard():
     start.openWallet()
     if start.vault is not None:
         start.openVault()
+    # start.startSubscription()
     holdingBalance = round(
         start.wallet.balanceAmount + (
             start.vault.balanceAmount if start.vault is not None else 0), 8)

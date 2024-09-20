@@ -1,6 +1,7 @@
 from typing import Union
 import os
 import time
+import socket
 import json
 import random
 import threading
@@ -25,7 +26,7 @@ from satorineuron.relay import RawStreamRelayEngine, ValidateRelayStream
 from satorineuron.structs.start import StartupDagStruct
 from satorineuron.structs.pubsub import SignedStreamId
 from satorineuron.synergy.engine import SynergyManager
-
+from satoriwallet.api.blockchain import ElectrumX
 
 def getStart():
     ''' returns StartupDag singleton '''
@@ -101,6 +102,17 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
         self.stakeStatus: bool = False
         self.miningMode: bool = False
         self.mineToVault: bool = False
+        self.retry_attempts = 3
+        self.timeout = 5
+        self.failed_servers = set()
+        self.servers: list[str] = [
+            '146.190.149.237:50002',
+            '146.190.38.120:50002',
+            'electrum1-mainnet.evrmorecoin.org:50002',
+            'electrum2-mainnet.evrmorecoin.org:50002',
+        ]
+        self.conn = None
+        self.last_handshake = None
         if not config.get().get('disable_restart', False):
             self.restartThread = threading.Thread(
                 target=self.restartEverythingPeriodic, daemon=True)
@@ -156,6 +168,79 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
     @property
     def wallet(self) -> Union[EvrmoreWallet, RavencoinWallet]:
         return self._evrmoreWallet if self.env == 'prod' else self._ravencoinWallet
+    
+    @staticmethod
+    def interpret(decoded: dict) -> Union[dict, None]:
+        # print(x.decode('utf-8'))
+        # decoded = json.loads(x.decode('utf-8'))
+        if decoded is None:
+            return None
+        if isinstance(decoded, str):
+            return {'result': decoded}
+        if 'result' in decoded.keys():
+            return decoded.get('result')
+        if 'error' in decoded.keys():
+            return decoded.get('error')
+        else:
+            return decoded
+
+    def connected(self):
+        return self.conn is not None and self.conn.connected()
+    
+    def _ensureConnected(self):
+        if not self.conn:
+            self.connect()
+        elif not self.conn.connected():
+            self.connect()
+            
+     # Handshake method to create the handshake with the ElectrumX server
+    def handshake(self) -> bool:
+        self._ensureConnected()
+        logging.info("Last handshake time", self.last_handshake, color="green")
+        # Address not found for neither wallet nor vault
+        if self.last_handshake and time.time() - self.last_handshake < 60 * 60:
+            return True
+
+        for _ in range(self.retry_attempts):
+            try:
+                name = f'Satori Neuron {time.time()}'
+                assetApiVersion = '1.10'
+                handshake = StartupDag.interpret(self.conn.send('server.version', name, assetApiVersion))
+                if handshake[0].startswith(f'ElectrumX') and handshake[1] == assetApiVersion:
+                    self.last_handshake = time.time()
+                    return True
+            except Exception:
+                self.conn = None  # Force reconnect on the next try
+
+        print("Handshake failed after multiple attempts")
+        return False
+    
+    def connect(self):
+        print(f"!!!!!!!!!!!!!!!Trying to build the connection in main!!!!!!!!!! {self.conn}")
+        if len(self.servers) == 0:
+            raise Exception("No servers available")
+        if self.conn is not None:
+            return self.conn
+        tries = 0
+        while tries < self.retry_attempts:
+            tries += 1
+            hostPort = random.choice(self.servers)
+            if hostPort in self.failed_servers:
+                continue
+            try:
+                self.conn = ElectrumX(
+                    host=hostPort.split(':')[0],
+                    port=int(hostPort.split(':')[1]),
+                    ssl=True,
+                    timeout=self.timeout
+                )
+                return self.conn
+            except socket.timeout:
+                self.failed_servers.add(hostPort)
+            except Exception as e:
+                self.failed_servers.add(hostPort)
+                print(f"Connection error to {hostPort}: {str(e)}")
+        raise Exception("Unable to connect to any ElectrumX server")
 
     # @property
     # def ravencoinWallet(self) -> RavencoinWallet:
@@ -225,14 +310,24 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
     #         self._evrmoreVault.open(password)
     #     return self._evrmoreVault
     
+    def startSubscription(self, network: str = None):
+        network = network or self.network
+        if not self.networkIsTest(network):
+            wallet = getattr(self, f'_evrmoreWallet')
+            wallet.electrumx.subscribeScriptHash();
+    
     def initialize_wallet_and_vault(self, network: str = None):
         # Initialize wallets
         network = network or self.network
+        self.connect();
+        logging.info("!!!!!Connection Made Init!!!!!!", self.conn, color="green");
+        self.handshake();
+        
         if self.networkIsTest(network):
             self._ravencoinWallet = self._initialize_wallet('ravencoin')
             self._ravencoinVault = self._initialize_vault("ravencoin", None, False)
-        self._evrmoreWallet = self._initialize_wallet('evrmore')
-        self._evrmoreVault = self._initialize_vault("evrmore", None, False)
+        self._evrmoreWallet = self._initialize_wallet('evrmore', self.conn, self.last_handshake)
+        self._evrmoreVault = self._initialize_vault("evrmore", None, False, self.conn, self.last_handshake)
 
         for network in ['ravencoin', 'evrmore']:
             wallet = getattr(self, f'_{network}Wallet')
@@ -240,6 +335,7 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
             
             if wallet:
                 logging.info(f'{network.capitalize()} wallet initialized', color="green")
+                # logging.info("Connection After Initialization", wallet, color="red")
             else:
                 logging.info(f'{network.capitalize()} wallet not initialized', color="red")
 
@@ -255,7 +351,7 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
             logging.info("No vaults initialized", color="red")
 
     # new method
-    def _initialize_wallet(self, network: str) -> Union[EvrmoreWallet, RavencoinWallet, None]:
+    def _initialize_wallet(self, network: str, connection: ElectrumX = None, last_handshake = None) -> Union[EvrmoreWallet, RavencoinWallet, None]:
         wallet_path = config.walletPath(f'wallet.yaml')
         wallet_class = EvrmoreWallet if network == 'evrmore' else RavencoinWallet
         wallet_attr = '_evrmoreWallet' if network == 'evrmore' else '_ravencoinWallet'
@@ -269,6 +365,9 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
                 walletPath=wallet_path,
                 reserve=0.25,
                 isTestnet=self.networkIsTest(network),
+                connection=connection,
+                last_handshake=last_handshake,
+                type='wallet'
             )
 
             setattr(self, wallet_attr, wallet)
@@ -279,7 +378,7 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
             return None
         
     # new method
-    def _initialize_vault(self, network: str, password: Union[str, None] = None, create: bool = False) -> Union[EvrmoreWallet, RavencoinWallet, None]:
+    def _initialize_vault(self, network: str, password: Union[str, None] = None, create: bool = False, connection: ElectrumX = None, last_handshake = None) -> Union[EvrmoreWallet, RavencoinWallet, None]:
         vault_path = config.walletPath('vault.yaml')
         wallet_class = EvrmoreWallet if network == 'evrmore' else RavencoinWallet
         vault_attr = '_evrmoreVault' if network == 'evrmore' else '_ravencoinVault'
@@ -301,7 +400,10 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
                 walletPath=vault_path,
                 reserve=0.25,
                 isTestnet=self.networkIsTest(network),
-                password=password
+                password=password,
+                connection=connection,
+                last_handshake=last_handshake,
+                type='vault'
             )
 
             if password is None:
