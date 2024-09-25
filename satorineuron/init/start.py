@@ -46,6 +46,8 @@ class SingletonMeta(type):
 
 class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
     ''' a DAG of startup tasks. '''
+    _walletInstance = None
+    _vaultInstance = None
 
     def __init__(
         self,
@@ -448,8 +450,14 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
         logging.info('opening wallet', color='green');
         if self.lastWalletCall + self.electrumCooldown < time.time():
             self.lastWalletCall = time.time()
-            wallet = wallet()
-            if wallet.electrumx.conn is not None:
+            if StartupDag._walletInstance is None:
+                logging.info('opening new wallet', color='green');
+                wallet = wallet()
+                StartupDag._walletInstance = wallet;
+            else:
+                logging.info('opening existing wallet', color='green');
+                StartupDag._walletInstance.init();
+            if StartupDag._walletInstance.electrumx.conn is not None:
                 self.updateConnectionStatus(
                     connTo=ConnectionTo.electrumx,
                     status=True)
@@ -499,8 +507,14 @@ class StartupDag(StartupDagStruct, metaclass=SingletonMeta):
         vault = self.getVault(network, password, create)
         if vault is not None and self.lastVaultCall + self.electrumCooldown < time.time():
             self.lastVaultCall = time.time()
-            vault = vault()
-            if vault.electrumx.conn is not None:
+            if StartupDag._vaultInstance is None:
+                logging.info('opening new vault', color='green');
+                vault = vault()
+                StartupDag._vaultInstance = vault;
+            else:
+                logging.info('opening existing vault', color='green');
+                StartupDag._vaultInstance.init();
+            if StartupDag._vaultInstance.electrumx.conn is not None:
                 self.updateConnectionStatus(
                     connTo=ConnectionTo.electrumx,
                     status=True)
